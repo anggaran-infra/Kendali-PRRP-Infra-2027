@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Monitoring PRRP TA 2027</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&family=Russo+One&display=swap">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // Menampilkan pesan bila skrip aplikasi gagal dimuat.
+      window.addEventListener('error', function (e) {
+        var root = document.getElementById('root');
+        if (root && !root.innerHTML) {
+          var pre = document.createElement('pre');
+          pre.style.cssText = 'margin:24px;padding:18px;border:1px solid #eec4c4;border-radius:8px;' +
+            'background:#fdeeee;color:#a12f2f;font:15px/1.5 monospace;white-space:pre-wrap';
+          pre.textContent = 'Aplikasi gagal dimuat.\n' + (e.message || 'Kesalahan tidak diketahui') +
+            (e.filename ? '\nBerkas: ' + e.filename.split('/').pop() : '') +
+            (e.lineno ? '\nBaris: ' + e.lineno : '');
+          root.appendChild(pre);
+        }
+      });
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+    <script src="config.js"></script>
+    <script src="wilayah.js"></script>
+    <script src="peta.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
