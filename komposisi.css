@@ -1,0 +1,9 @@
+/* Tambahan komposisi, tidak mengubah styles.css asli */
+#komposisi-prrp {background:#fff;border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:18px;overflow:hidden}
+#komposisi-prrp header{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}
+#komposisi-prrp table{width:100%;border-collapse:collapse;white-space:nowrap}
+#komposisi-prrp th,#komposisi-prrp td{padding:12px;text-align:right;border-bottom:1px solid var(--border)}
+#komposisi-prrp th:first-child{text-align:left}
+#komposisi-prrp .fa-scroll{overflow-x:auto}
+#komposisi-prrp footer{padding-top:12px}
+#komposisi-prrp .fa-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
