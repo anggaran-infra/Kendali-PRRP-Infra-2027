@@ -1,16 +1,3 @@
-// =====================================================================
-// KENDALI PRRP — APLIKASI (VERSI SUPABASE)
-// Monitoring Percepatan Rehabilitasi dan Rekonstruksi Pascabencana TA 2027
-// =====================================================================
-//
-// Halaman ini berjalan sepenuhnya di browser dan terhubung ke Supabase:
-//   • Login        : Supabase Auth (User ID dipetakan ke <userid>@loginDomain)
-//   • Data         : fungsi database api_* (lihat supabase/skema.sql)
-//   • PDF          : Supabase Storage, bucket privat "dokumen"
-//   • Kelola akun  : Edge Function "kelola-pengguna"
-// Pengaturan koneksi ada di config.js.
-// =====================================================================
-
 (function () {
   'use strict';
 
@@ -20,7 +7,7 @@
 
   const DARING = 'Daring/Tanpa Lokasi Fisik';
   const PETA = window.PETA_SUMATERA || null;
-  const REF = window.REFERENSI_PRRP && window.REFERENSI_PRRP.wilayah ? window.REFERENSI_PRRP : null;
+  let REF = window.REFERENSI_PRRP && window.REFERENSI_PRRP.wilayah ? window.REFERENSI_PRRP : null;
   const STATUSES = ['Pending', 'SPP/SPM', 'SP2D'];
 
   // Akrual (dasar realisasi) = SP2D + SPP/SPM, sesuai pencatatan akrual
@@ -49,13 +36,13 @@
   // Batas hari sebelum transaksi diberi peringatan tindak lanjut.
   const STALE_DAYS = { Pending: 10, 'SPP/SPM': 7 };
 
-  const UNIT_DEFAULT = [
-    { code: 'D1', name: '[Dep 1] Penyediaan Lahan dan Penataan Ruang', budget: 1200000000 },
-    { code: 'D2', name: '[Dep 2] Perhubungan/Konektivitas', budget: 600000000 },
-    { code: 'D3', name: '[Dep 3] Infrastruktur', budget: 1200000000 },
-    { code: 'D4', name: '[Dep 4] Perumahan dan Pemukiman', budget: 1200000000 },
-    { code: 'Setmenko', name: '[Setmenko] Kolaborasi Rintisan', budget: 1400000000 }
-  ];
+  const BIDANG_UNIT = {
+    D1: ['Deputi 1', 'Bidang Penyediaan Lahan dan Penataan Ruang'],
+    D2: ['Deputi 2', 'Bidang Konektivitas'],
+    D3: ['Deputi 3', 'Bidang Infrastruktur'],
+    D4: ['Deputi 4', 'Bidang Perumahan dan Permukiman'],
+    Setmenko: ['Setmenko', 'Kolaborasi dan Rintisan']
+  };
 
   const ACTIVITIES = [
     'Penambahan transaksi', 'Perubahan nominal', 'Perubahan unit kerja',
@@ -116,7 +103,7 @@
     usersLoaded: false,
     usersLoading: false,
     pagu: [],
-    paguTotal: 5600000000,
+    paguTotal: 0,
     entries: [],
     loaded: false,
     loading: false,
@@ -140,11 +127,6 @@
   // =========================================
   // UTILITAS
   // =========================================
-
-  const rupiah = value => {
-    const n = Math.round(Number(value) || 0);
-    return (n < 0 ? '−Rp' : 'Rp') + Math.abs(n).toLocaleString('id-ID');
-  };
 
   const percent = value =>
     (isFinite(value) ? value : 0).toLocaleString('id-ID', {
@@ -173,221 +155,15 @@
     return m[4] ? d + ', ' + m[4] + '.' + m[5] : d;
   }
 
-  // =========================================
-  // SAMBUNGAN KE SUPABASE
-  // =========================================
-
-  const CFG = window.PRRP_CONFIG || {};
-  const BUCKET = 'dokumen';
-  const LOGIN_DOMAIN = String(CFG.loginDomain || 'prrp.local').trim().toLowerCase();
-  const CONFIG_READY = !!(window.supabase && CFG.supabaseUrl && CFG.supabaseAnonKey &&
-    !/ISI_|GANTI/i.test(CFG.supabaseUrl + ' ' + CFG.supabaseAnonKey));
-
-  // Sesi login disimpan di sessionStorage: berakhir saat tab atau browser
-  // ditutup. Bila browser memblokir penyimpanan, sesi disimpan di memori.
-  const authStorage = (() => {
-    try {
-      sessionStorage.setItem('__prrp', '1');
-      sessionStorage.removeItem('__prrp');
-      return sessionStorage;
-    } catch (ignore) {
-      const memory = {};
-      return {
-        getItem: key => (key in memory ? memory[key] : null),
-        setItem: (key, value) => { memory[key] = String(value); },
-        removeItem: key => { delete memory[key]; }
-      };
-    }
-  })();
-
-  const sb = CONFIG_READY
-    ? window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, {
-      auth: {
-        storage: authStorage,
-        storageKey: 'kendali-prrp-auth',
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: false
-      }
-    })
-    : null;
-
-  // Nama permintaan di aplikasi → fungsi database (RPC).
-  const RPC = {
-    listHistory: 'api_riwayat',
-    updateEntry: 'api_ubah',
-    updateStatus: 'api_ubah_status',
-    deleteEntry: 'api_batalkan',
-    adjustPagu: 'api_sesuaikan_pagu',
-    listUsers: 'api_daftar_pengguna',
-    setUserActive: 'api_aktif_pengguna'
-  };
-
-  function dbError(error) {
-    const text = String((error && (error.message || error.error_description || error.msg)) || 'Terjadi kesalahan.');
-    const code = String((error && error.code) || '');
-    if (/JWT expired|invalid JWT|jwt malformed|not authenticated|permission denied for function/i.test(text) || /^PGRST30/.test(code)) {
-      return new Error('Sesi berakhir. Silakan masuk kembali.');
-    }
-    if (/Failed to fetch|NetworkError|Load failed|Failed to send/i.test(text)) {
-      return new Error('Tidak dapat terhubung ke server. Periksa koneksi internet, lalu coba lagi.');
-    }
-    return new Error(text);
-  }
-
-  async function rpc(fn, argument) {
-    const { data, error } = await sb.rpc(fn, argument === undefined || argument === null ? {} : { p: argument });
-    if (error) throw dbError(error);
-    return data;
-  }
-
-  // Menambah pengguna dan mengatur ulang password (Edge Function).
-  async function kelolaPengguna(body) {
-    const { data, error } = await sb.functions.invoke('kelola-pengguna', { body });
-    if (error) {
-      let text = error.message || '';
-      try {
-        const detail = await error.context.json();
-        text = detail.error || detail.message || detail.msg || text;
-      } catch (ignore) {}
-      if (/Failed to send|not found|404/i.test(text)) {
-        text = 'Edge Function kelola-pengguna belum terpasang atau tidak dapat dihubungi.';
-      }
-      throw dbError({ message: text });
-    }
-    if (!data || data.ok === false) throw new Error((data && data.error) || 'Permintaan gagal.');
-    return data;
-  }
-
-  // ---------- PDF di Supabase Storage ----------
-
-  async function sha256Base64(buffer) {
-    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buffer));
-    let binary = '';
-    digest.forEach(b => { binary += String.fromCharCode(b); });
-    return btoa(binary);
-  }
-
-  function newUuid() {
-    if (window.crypto.randomUUID) return window.crypto.randomUUID();
-    const b = window.crypto.getRandomValues(new Uint8Array(16));
-    b[6] = (b[6] & 15) | 64;
-    b[8] = (b[8] & 63) | 128;
-    const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
-    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
-  }
-
-  async function preparePdf(file) {
-    const buffer = await file.arrayBuffer();
-    const head = String.fromCharCode.apply(null, new Uint8Array(buffer.slice(0, 5)));
-    if (head !== '%PDF-' || buffer.byteLength > 20 * 1024 * 1024) {
-      throw new Error('Berkas harus berupa PDF, maksimal 20 MB.');
-    }
-    return { buffer, name: file.name, hash: await sha256Base64(buffer) };
-  }
-
-  async function uploadPdf(pdf) {
-    const key = 'transaksi/' + new Date().getFullYear() + '/' + newUuid() + '.pdf';
-    const { error } = await sb.storage.from(BUCKET).upload(key,
-      new Blob([pdf.buffer], { type: 'application/pdf' }),
-      { contentType: 'application/pdf', upsert: false });
-    if (error) throw dbError({ message: 'PDF tidak dapat diunggah: ' + error.message });
-    return { key, name: pdf.name, hash: pdf.hash };
-  }
-
-  // Transaksi baru: periksa dulu (termasuk PDF ganda), unggah PDF, lalu simpan.
-  async function addEntry(argument) {
-    const data = Object.assign({}, argument);
-    const file = data.file;
-    delete data.file;
-    if (!file) return rpc('api_tambah', data);
-
-    const pdf = await preparePdf(file);
-    await rpc('api_tambah', Object.assign({}, data, { periksa: true, file: { hash: pdf.hash } }));
-    const uploaded = await uploadPdf(pdf);
-    return rpc('api_tambah', Object.assign({}, data, { file: uploaded }));
-  }
-
-  async function replacePdf(argument) {
-    const pdf = await preparePdf(argument.file);
-    await rpc('api_cek_pdf', { id: argument.id, hash: pdf.hash });
-    const uploaded = await uploadPdf(pdf);
-    return rpc('api_ganti_pdf', { id: argument.id, file: uploaded });
-  }
-
-  // Tautan PDF privat berlaku 12 jam; dibuat ulang setiap data dimuat.
-  async function attachFileUrls(data) {
-    const entries = (data && data.entries) || [];
-    const keys = entries.filter(e => e.fileSource === 'storage' && e.fileKey).map(e => e.fileKey);
-    if (!keys.length) return data;
-
-    const { data: signed, error } = await sb.storage.from(BUCKET).createSignedUrls(keys, 12 * 60 * 60);
-    if (error || !signed) return data;
-
-    const urls = {};
-    signed.forEach(item => { if (item && !item.error && item.signedUrl) urls[item.path] = item.signedUrl; });
-    entries.forEach(e => { if (e.fileSource === 'storage') e.fileUrl = urls[e.fileKey] || ''; });
-    return data;
-  }
-
-  // ---------- Masuk ----------
-
-  async function signIn(argument) {
-    const id = String(argument.userId || '').trim().toLowerCase();
-    const email = id.includes('@') ? id : id + '@' + LOGIN_DOMAIN;
-    const { error } = await sb.auth.signInWithPassword({ email, password: argument.password });
-
-    if (error) {
-      const text = String(error.message || '');
-      if (/invalid login credentials|invalid (email|password)|invalid_credentials/i.test(text + ' ' + (error.code || ''))) {
-        throw new Error('User ID atau password salah.');
-      }
-      if (/rate limit|too many/i.test(text)) {
-        throw new Error('Terlalu banyak percobaan masuk. Coba lagi beberapa menit lagi atau hubungi Admin.');
-      }
-      if (/banned/i.test(text)) throw new Error('Akun ' + id + ' dinonaktifkan. Hubungi Admin.');
-      throw dbError(error);
-    }
-
-    try {
-      const data = await rpc('api_data');
-      return { token: 'supabase', user: data.user };
-    } catch (problem) {
-      await sb.auth.signOut({ scope: 'local' }).catch(() => {});
-      throw problem;
-    }
-  }
-
-  async function call(name, argument) {
-    if (!sb) throw new Error('Aplikasi belum dihubungkan ke Supabase. Isi berkas config.js.');
-
-    switch (name) {
-      case 'login': return signIn(argument);
-      case 'logout': await sb.auth.signOut({ scope: 'local' }); return { ok: true };
-      case 'getAppData': return attachFileUrls(await rpc('api_data'));
-      case 'addEntry': return addEntry(argument);
-      case 'replacePdf': return replacePdf(argument);
-      case 'saveUser':
-        return argument && argument.baru
-          ? kelolaPengguna(Object.assign({ aksi: 'tambah' }, argument))
-          : rpc('api_simpan_pengguna', argument);
-      case 'resetPassword': return kelolaPengguna(Object.assign({ aksi: 'reset_password' }, argument));
-      case 'getBackground': return CFG.backgroundUrl || '';
-      default:
-        if (RPC[name]) return rpc(RPC[name], argument);
-        throw new Error('Permintaan tidak dikenal.');
-    }
-  }
-
-  // Permintaan yang boleh dilakukan tanpa sesi.
-  const PUBLIC_CALLS = ['login', 'logout', 'getBackground'];
-  const SESSION_ERROR = /Sesi berakhir|dinonaktifkan|belum terdaftar/;
+  // Fungsi yang dapat dipanggil tanpa sesi. Fungsi lain dikirim melalui
+  // api(token, nama, data) dan diperiksa sesi serta perannya di server.
+  const PUBLIC_CALLS = ['login', 'logout', 'getReferensi'];
+  const SESSION_ERROR = /Sesi berakhir/;
 
   function server(name, argument) {
-    return call(name, argument).catch(raw => {
-      const error = raw instanceof Error ? raw : new Error(String(raw));
+    return window.prrpRequest(name, argument).catch(error => {
       if (!PUBLIC_CALLS.includes(name) && SESSION_ERROR.test(errorText(error))) {
-        sessionExpired(errorText(error));
+        sessionExpired();
       }
       throw error;
     });
@@ -395,33 +171,28 @@
 
   // ---------- Sesi masuk ----------
 
-  // Data pengguna disimpan sementara agar menu langsung sesuai peran saat
-  // halaman dimuat ulang. Token login dikelola oleh Supabase.
-  const SESSION_KEY = 'kendaliPrrpPengguna';
+  const SESSION_KEY = 'kendaliPrrpSesi';
 
   function saveSession() {
     try {
-      sessionStorage.setItem(SESSION_KEY, JSON.stringify({ user: state.user }));
-    } catch (ignore) {}
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: state.token, user: state.user }));
+    } catch (ignore) {
+      // Sesi tetap berlaku sampai halaman ditutup atau dimuat ulang.
+    }
   }
 
-  async function readSession() {
-    if (!sb) return null;
-    const { data } = await sb.auth.getSession();
-    if (!data || !data.session) return null;
-
-    let user = null;
+  function readSession() {
     try {
-      user = (JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null') || {}).user || null;
-    } catch (ignore) {}
-
-    return { token: 'supabase', user };
+      const data = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+      return data && typeof data.token === 'string' && data.token.length > 30 ? data : null;
+    } catch (ignore) {
+      return null;
+    }
   }
 
   function clearSession() {
     state.token = '';
     try { sessionStorage.removeItem(SESSION_KEY); } catch (ignore) {}
-    if (sb) sb.auth.signOut({ scope: 'local' }).catch(() => {});
   }
 
   const role = () => (state.user && state.user.peran) || '';
@@ -430,7 +201,7 @@
 
   function errorText(error) {
     const text = (error && error.message) || String(error || 'Terjadi kesalahan.');
-    return text.replace(/^(?:\s*(?:ScriptError|Exception|Error):\s*)+/, '');
+    return text.replace(/^Exception:\s*/, '').replace(/^Error:\s*/, '');
   }
 
   function notify(message, type) {
@@ -445,32 +216,53 @@
     if (!type) noticeTimer = setTimeout(() => { box.hidden = true; }, 7000);
   }
 
-  function units() {
-    return state.pagu.length ? state.pagu : UNIT_DEFAULT;
+  function unitParts(value) {
+    const text = String(value || '').trim();
+    const match = /^\[?(?:D(?:ep(?:uti)?)?\s*([1-4])|(Setmenko))(?=$|[\s\]–—-])/i.exec(text);
+    return match ? BIDANG_UNIT[match[1] ? 'D' + match[1] : 'Setmenko'] : [text || '—', ''];
   }
 
   function unitName(code) {
-    const unit = units().find(u => u.code === code);
-    return unit ? unit.name : (code || '—');
+    const parts = unitParts(code);
+    if (parts[1]) return parts.join(' — ');
+    const unit = state.pagu.find(u => u.code === code);
+    return unit?.name || parts[0];
   }
 
-  // "[Dep 1] Penyediaan Lahan" → kode tebal, keterangan biasa dan lebih kecil.
+  function units() {
+    const rows = state.pagu.map(u => ({...u, name: unitName(u.code)}));
+    for (const code of Object.keys(BIDANG_UNIT)) {
+      if (!rows.some(u => u.code === code)) rows.push({code, name: unitName(code), budget: 0});
+    }
+    return rows;
+  }
+
   function unitHtml(name) {
-    const m = /^\s*(\[[^\]]+\])\s*(.*)$/.exec(String(name || ''));
-    if (!m) return `<strong>${esc(name)}</strong>`;
-    return `<strong>${esc(m[1])}</strong>${m[2] ? ` <span class="unit-desc">${esc(m[2])}</span>` : ''}`;
+    const [label, bidang] = unitParts(name);
+    return '<strong>' + esc(label) + '</strong>' +
+      (bidang ? ' <span class="unit-desc">' + esc(bidang) + '</span>' : '');
+  }
+
+  function unitRingkasanHtml(name) {
+    const [label, bidang] = unitParts(name);
+    const bidangHtml = label === 'Deputi 1'
+      ? esc(bidang).replace(' dan ', '<br> dan ')
+      : esc(bidang);
+    return '<strong class="prrp-unit-label">' + esc(label) + '</strong>' +
+      (bidang ? '<span class="prrp-unit-desc">' + bidangHtml + '</span>' : '');
+  }
+
+  function historyUnit(value) {
+    return String(value || '').split(/\s*(?:→|->)\s*/).map(unitName).join(' → ');
   }
 
   function digits(value) {
     return String(value || '').replace(/\D/g, '');
   }
 
-  const DRIVE_FILE = 'https://drive.google.com/file/d/';
-  const driveUrl = id => DRIVE_FILE + encodeURIComponent(id) + '/view';
-
-  // PDF baru tersimpan di Supabase Storage (tautan bertanda tangan);
-  // PDF lama dari Google Drive tetap memakai tautan Drive.
-  const fileUrl = e => e.fileSource === 'storage' ? (e.fileUrl || '#') : driveUrl(e.fileKey);
+  // Tautan Google Drive disusun tanpa garis miring ganda karena
+  // Apps Script memperlakukannya sebagai awal komentar.
+  const driveUrl = id => '#pdf/' + encodeURIComponent(id);
 
   // =========================================
   // PERHITUNGAN
@@ -568,7 +360,7 @@
   function unitStats() {
     const stats = {};
     units().forEach(u => {
-      stats[u.code] = { code: u.code, name: u.name, budget: u.budget, SP2D: 0, 'SPP/SPM': 0, Pending: 0 };
+      stats[u.code] = { code: u.code, name: u.name, budget: Number(u.budget) || 0, SP2D: 0, 'SPP/SPM': 0, Pending: 0 };
     });
 
     state.entries.forEach(entry => {
@@ -680,7 +472,8 @@
               <div class="brand-sub">Tahun Anggaran 2027</div>
             </div>
           </div>
-          <nav class="nav" aria-label="Menu utama">
+          <button type="button" class="btn btn-secondary menu-toggle" aria-expanded="false" aria-controls="prrp-nav userBox">Menu</button>
+          <nav id="prrp-nav" class="nav" aria-label="Menu utama">
             ${visiblePages().map(p => `
               <button type="button" data-page="${p.id}">${p.icon}<span>${p.label}</span></button>
             `).join('')}
@@ -707,9 +500,24 @@
       <div id="modalRoot"></div>
     `;
 
+    const sidebar = document.querySelector('.layout .sidebar');
+    const toggle = sidebar.querySelector('.menu-toggle');
+    const setMenu = open => {
+      sidebar.classList.toggle('menu-open', open);
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.textContent = open ? 'Tutup menu' : 'Menu';
+    };
+    toggle.onclick = () => setMenu(toggle.getAttribute('aria-expanded') !== 'true');
+    sidebar.onkeydown = event => {
+      if (event.key === 'Escape' && sidebar.classList.contains('menu-open')) {
+        setMenu(false);
+        toggle.focus();
+      }
+    };
     document.querySelectorAll('[data-page]').forEach(button => {
       button.addEventListener('click', () => {
         state.page = button.dataset.page;
+        setMenu(false);
         state.selected = null;
         renderPage();
         window.scrollTo(0, 0);
@@ -726,17 +534,33 @@
   function renderUserBox() {
     const box = document.getElementById('userBox');
     if (!box || !state.user) return;
+    const name = state.user.nama || state.user.userId;
+    const duplicateRole = name === state.user.peran ||
+      (state.user.peran === 'Admin' && /^(admin|administrator)$/i.test(name));
     box.innerHTML = `
-      <div class="user-label">Masuk sebagai</div>
       <div class="user-name">${esc(state.user.nama || state.user.userId)}</div>
-      <div class="user-meta">${esc(state.user.userId)} · <span class="role-tag">${esc(state.user.peran)}</span></div>
+      ${duplicateRole ? '' : `<div class="user-meta"><span class="role-tag">${esc(state.user.peran)}</span></div>`}
       <button type="button" class="btn btn-ghost btn-logout" id="logoutBtn">${ICON.logout}Keluar</button>`;
     box.querySelector('#logoutBtn').addEventListener('click', signOut);
+  }
+
+  const bagianTertutup = new Set();
+
+  function judulLipat(id, judul, kelas, heading) {
+    const buka = bagianTertutup.has(id) ? '' : ' open';
+    return `<details class="prrp-lipat ${kelas}" aria-labelledby="${id}"${buka}>
+      <summary><${heading} id="${id}">${judul}</${heading}></summary>`;
   }
 
   function renderPage() {
     const container = document.getElementById('page');
     if (!container) return;
+
+    container.querySelectorAll('details.prrp-lipat').forEach(bagian => {
+      const id = bagian.getAttribute('aria-labelledby');
+      if (bagian.open) bagianTertutup.delete(id);
+      else bagianTertutup.add(id);
+    });
 
     if (!visiblePages().some(p => p.id === state.page)) state.page = 'ringkasan';
     const page = PAGES.find(p => p.id === state.page);
@@ -754,7 +578,9 @@
         <p>${page.desc}</p>
       </div>`;
 
-    if (state.page === 'ringkasan') container.innerHTML = intro + staleAlert(true) + pageRingkasan();
+    if (state.page === 'ringkasan') {
+      container.innerHTML = intro + staleAlert(true) + pageRingkasan();
+    }
     if (state.page === 'dana') container.innerHTML = intro + staleAlert(false) + pageDana();
     if (state.page === 'riwayat') container.innerHTML = intro + pageRiwayat();
     if (state.page === 'pengguna') container.innerHTML = intro + pagePengguna();
@@ -762,7 +588,12 @@
     container.querySelectorAll('[data-show-stale]').forEach(b => b.addEventListener('click', showStale));
     renderNavBadge();
 
-    if (state.page === 'ringkasan') bindRingkasan();
+    if (state.page === 'ringkasan') {
+      bindRingkasan();
+      if (state.loaded && state.token) {
+        window.pasangKomposisiPRRP(container, state.token, isAdmin(), unitStats());
+      }
+    }
     if (state.page === 'dana') bindDana();
     if (state.page === 'riwayat') bindRiwayat();
     if (state.page === 'pengguna') bindPengguna();
@@ -787,19 +618,14 @@
   // MENU RINGKASAN
   // =========================================
 
-  // Rupiah ringkas untuk infografis: Rp5,6 M / Rp912 jt.
-  function rupiahShort(value) {
-    const n = Number(value) || 0;
-    const fmt = (v, d) => v.toLocaleString('id-ID', { maximumFractionDigits: d });
-    if (Math.abs(n) >= 1e12) return 'Rp' + fmt(n / 1e12, 2) + ' T';
-    if (Math.abs(n) >= 1e9) return 'Rp' + fmt(n / 1e9, 2) + ' M';
-    if (Math.abs(n) >= 1e6) return 'Rp' + fmt(n / 1e6, 1) + ' jt';
-    return rupiah(n);
-  }
+  const ribuan = value => (Number(value) / 1000).toLocaleString('id-ID', {
+    maximumFractionDigits: 3
+  });
 
   // Lebar segmen batang komposisi (persen dari pagu, tidak melebihi 100).
   function segments(s) {
-    const budget = s.budget || 1;
+    const budget = s.budget;
+    if (budget <= 0) return {sp2d: 0, spm: 0, pend: 0, rest: 0};
     let left = 100;
     const take = v => {
       const w = Math.max(0, Math.min(left, v / budget * 100));
@@ -818,10 +644,10 @@
       ? `<span class="seg ${cls}" style="width:${width.toFixed(2)}%" title="${esc(title)}"></span>` : '';
     return `
       <div class="comp-bar${tall ? ' tall' : ''}" role="img"
-        aria-label="SP2D ${rupiah(s.SP2D)}, SPP/SPM ${rupiah(s['SPP/SPM'])}, Pending ${rupiah(s.Pending)}, pagu ${rupiah(s.budget)}">
-        ${seg('sp2d', w.sp2d, 'SP2D ' + rupiah(s.SP2D))}
-        ${seg('spm', w.spm, 'SPP/SPM ' + rupiah(s['SPP/SPM']))}
-        ${seg('pend', w.pend, 'Pending ' + rupiah(s.Pending))}
+        aria-label="SP2D ${ribuan(s.SP2D)}, SPP/SPM ${ribuan(s['SPP/SPM'])}, Pending ${ribuan(s.Pending)}, pagu ${ribuan(s.budget)}">
+        ${seg('sp2d', w.sp2d, 'SP2D ' + ribuan(s.SP2D))}
+        ${seg('spm', w.spm, 'SPP/SPM ' + ribuan(s['SPP/SPM']))}
+        ${seg('pend', w.pend, 'Pending ' + ribuan(s.Pending))}
       </div>`;
   }
 
@@ -832,7 +658,7 @@
     return `
       <svg class="gauge" viewBox="0 0 140 140" role="img" aria-label="Akrual ${percent(pct)} dari pagu">
         <circle cx="70" cy="70" r="${r}" class="gauge-track"></circle>
-        <circle cx="70" cy="70" r="${r}" class="gauge-fill${pct > 100 ? ' over' : ''}"
+        <circle opacity="${v > 0 ? 1 : 0}" cx="70" cy="70" r="${r}" class="gauge-fill${pct > 100 ? ' over' : ''}"
           stroke-dasharray="${(c * v / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 70 70)"></circle>
         <text x="70" y="68" text-anchor="middle" class="gauge-value">${percent(pct)}</text>
         <text x="70" y="90" text-anchor="middle" class="gauge-label">dari pagu</text>
@@ -851,36 +677,38 @@
 
     return `
       <section class="hero-info" aria-labelledby="ttlHero">
+        <small class="hero-unit">Dalam ribuan rupiah</small>
         <div class="hero-main">
           ${gauge(pct)}
           <div>
             <div class="hero-eyebrow" id="ttlHero">Akrual PRRP TA 2027</div>
-            <div class="hero-value">${rupiahShort(t.real)}</div>
-            <div class="hero-sub">dari pagu ${rupiahShort(t.budget)} · SP2D + SPP/SPM</div>
+            <div class="hero-value">${ribuan(t.real)}</div>
+            <div class="hero-sub">SP2D + SPP/SPM</div>
           </div>
         </div>
         <div class="hero-stats">
           <div class="hero-stat">
             <span class="label">Pagu</span>
-            <span class="value">${rupiahShort(t.budget)}</span>
-            <span class="full">${rupiah(t.budget)}</span>
+            <span class="value">${ribuan(t.budget)}</span>
           </div>
           <div class="hero-stat">
-            <span class="label">Sisa pagu</span>
-            <span class="value">${rupiahShort(t.budget - t.real)}</span>
-            <span class="full">${rupiah(t.budget - t.real)}</span>
+            <span class="label">Realisasi · SP2D</span>
+            <span class="value">${ribuan(t.SP2D)}</span>
+          </div>
+          <div class="hero-stat">
+            <span class="label">Sisa Pagu</span>
+            <span class="value">${ribuan(t.budget - t.real)}</span>
           </div>
           <div class="hero-stat warn">
             <span class="label">Pending</span>
-            <span class="value">${rupiahShort(t.Pending)}</span>
-            <span class="full">Perlu perhatian · ${rupiah(t.Pending)}</span>
+            <span class="value">${ribuan(t.Pending)}</span>
           </div>
         </div>
         <div class="hero-comp">
           ${compositionBar(t, true)}
           <ul class="comp-legend">
             ${legend.map(l => `
-              <li><span class="key ${l[0]}"></span>${l[1]} <strong>${rupiahShort(l[2])}</strong></li>`).join('')}
+              <li title="${l[1]} · ${ribuan(l[2])}"><span class="key ${l[0]}"></span>${l[1]}</li>`).join('')}
           </ul>
         </div>
       </section>`;
@@ -897,21 +725,21 @@
           const pct = s.budget ? s.real / s.budget * 100 : 0;
           return `
             <div class="unit-row">
-              <div class="unit-name">${unitHtml(s.name)}
-                <span class="unit-pagu">Pagu ${rupiah(s.budget)}</span>
+              <div class="unit-name">${unitRingkasanHtml(s.name)}
+                <span class="unit-pagu">Pagu ${ribuan(s.budget)}</span>
               </div>
               <div class="unit-chart">
                 ${compositionBar(s)}
                 <div class="unit-meta">
-                  <span>SP2D ${rupiahShort(s.SP2D)}</span>
-                  <span>SPP/SPM ${rupiahShort(s['SPP/SPM'])}</span>
-                  ${s.Pending ? `<span class="warn-text">Pending ${rupiahShort(s.Pending)}</span>` : ''}
+                  <span>SP2D ${ribuan(s.SP2D)}</span>
+                  <span>SPP/SPM ${ribuan(s['SPP/SPM'])}</span>
+                  ${s.Pending ? `<span class="warn-text">Pending ${ribuan(s.Pending)}</span>` : ''}
                 </div>
               </div>
               <div class="unit-figures">
                 <span class="unit-pct${pct > 100 ? ' over' : ''}">${percent(pct)}</span>
-                <span class="unit-real">${rupiah(s.real)}</span>
-                <span class="unit-sisa">Sisa ${rupiah(s.budget - s.real)}</span>
+                <span class="unit-real">${ribuan(s.real)}</span>
+                <span class="unit-sisa">Sisa ${ribuan(s.budget - s.real)}</span>
               </div>
             </div>`;
         }).join('')}
@@ -926,10 +754,10 @@
     return `
       ${state.loaded ? heroPanel(stats) : '<section class="hero-info"><span class="skeleton"></span></section>'}
 
-      <section class="panel" aria-labelledby="tblRingkasan">
+      ${judulLipat('tblRingkasan', 'Akrual Anggaran per Unit Kerja', 'panel', 'h3')}
         <div class="panel-head">
           <div>
-            <h3 id="tblRingkasan">Akrual Anggaran per Unit Kerja</h3>
+            <small class="amount-unit">Dalam ribuan rupiah</small>
           </div>
           <ul class="comp-legend compact">
             <li><span class="key sp2d"></span>SP2D</li>
@@ -939,32 +767,26 @@
           </ul>
         </div>
         ${unitBars(stats)}
-      </section>
+      </details>
 
-      <section class="panel" aria-labelledby="ttlSebaran">
+      ${judulLipat('ttlSebaran', 'Sebaran Lokasi Kegiatan', 'panel', 'h3')}
         <div class="panel-head">
           <div>
-            <h3 id="ttlSebaran">Sebaran Lokasi Kegiatan</h3>
             <p class="note">
             Sebaran kegiatan PRRP di Aceh, Sumatera Utara, dan Sumatera Barat.
             </p>
           </div>
         </div>
         <div id="mapArea">${state.loaded ? mapArea() : '<div class="panel-body"><span class="skeleton"></span></div>'}</div>
-        <div class="panel-head" style="padding-top:8px">
-          <div>
-            <h3 id="ttlRekap">Rekapitulasi Lokasi</h3>
-            <p class="note">
-            </p>
-          </div>
-        </div>
-        <div class="tablewrap" id="rekapArea">${state.loaded ? rekapTable() : ''}</div>
-      </section>
+      </details>
 
-      <section class="panel" aria-labelledby="ttlFokus">
+      ${judulLipat('ttlRekap', 'Rekapitulasi Lokasi', 'panel', 'h3')}
+        <div class="tablewrap" id="rekapArea">${state.loaded ? rekapTable() : ''}</div>
+      </details>
+
+      ${judulLipat('ttlFokus', 'Fokus Pelaksanaan Kegiatan', 'panel', 'h3')}
         <div class="panel-head">
           <div>
-            <h3 id="ttlFokus">Fokus Pelaksanaan Kegiatan</h3>
             <p class="note">Perbandingan wilayah pelaksanaan, diurutkan dari nilai terbesar.</p>
           </div>
           <div class="actions">
@@ -984,7 +806,7 @@
           rehabilitasi dan rekonstruksi.<br>
           Kegiatan daring dan transaksi yang lokasinya belum teridentifikasi tidak ditampilkan pada grafik ini.
         </p>
-      </section>
+      </details>
     `;
   }
 
@@ -1008,7 +830,7 @@
 
     const cls = { '11': 'aceh', '12': 'sumut', '13': 'sumbar' };
     const provPaths = PETA ? PETA.provinsi.map(p =>
-      `<path class="prov ${cls[p.kode] || 'other'}" d="${p.d}"><title>${esc(p.nama)}</title></path>`
+      `<path class="prov ${cls[p.kode] || 'other'}" fill="${({11:'#21867F',12:'#3276AC',13:'#B76B32'})[p.kode] || '#DFE7EF'}" stroke="#fff" stroke-width="1.2" d="${p.d}"><title>${esc(p.nama)}</title></path>`
     ).join('') : '';
 
     const labels = [
@@ -1020,14 +842,24 @@
       return `<text class="prov-label" x="${p[0].toFixed(1)}" y="${p[1].toFixed(1)}" text-anchor="${l[3]}">${l[0]}</text>`;
     }).join('');
 
+    const placed = [];
     const markers = points.map(pt => {
       const p = xy(pt.lat, pt.lng);
       const n = pt.acts.size;
-      const r = Math.min(20, 10 + Math.sqrt(n) * 2.6);
-      const label = `${pt.name}, ${pt.prov}: ${n} kegiatan, akrual ${rupiah(pt.real)}`;
+      const r = Math.min(12, 7 + Math.sqrt(n));
+      // Geser label yang bertabrakan, pertahankan titik geografis melalui garis penghubung.
+      let x = p[0], y = p[1];
+      for (let step = 1; placed.some(q => Math.hypot(q.x - x, q.y - y) < q.r + r + 2) && step <= 180; step++) {
+        const distance = 3 * Math.sqrt(step);
+        x = Math.min(vb[0] + vb[2] - r, Math.max(vb[0] + r, p[0] + distance * Math.cos(step * 2.4)));
+        y = Math.min(vb[1] + vb[3] - r, Math.max(vb[1] + r, p[1] + distance * Math.sin(step * 2.4)));
+      }
+      placed.push({x, y, r});
+      const label = `${pt.name}, ${pt.prov}: ${n} kegiatan, akrual ${ribuan(pt.real)}`;
       return `
+        ${x !== p[0] || y !== p[1] ? `<line x1="${p[0]}" y1="${p[1]}" x2="${x}" y2="${y}" stroke="#43586a" stroke-width="1"/>` : ''}
         <g class="marker${state.selected === pt.code ? ' selected' : ''}" data-marker="${pt.code}"
-           tabindex="0" role="button" aria-label="${esc(label)}" transform="translate(${p[0].toFixed(1)} ${p[1].toFixed(1)})">
+           tabindex="0" role="button" aria-label="${esc(label)}" transform="translate(${x.toFixed(1)} ${y.toFixed(1)})">
           <circle class="ring" r="${(r + 5).toFixed(1)}"></circle>
           <circle class="dot" r="${r.toFixed(1)}"></circle>
           <text text-anchor="middle" dy="4.5">${n}</text>
@@ -1047,7 +879,7 @@
           <span class="muted">${esc(sel.prov)}</span>
           <dl>
             <dt>Jumlah kegiatan</dt><dd>${integer(sel.acts.size)}</dd>
-            <dt>Akrual</dt><dd>${rupiah(sel.real)}</dd>
+            <dt>Akrual</dt><dd>${ribuan(sel.real)}</dd>
           </dl>
         </div>`;
     }
@@ -1060,7 +892,7 @@
         <li>
           <span class="swatch" style="background:${c.color}"></span>
           <span>${c.label}</span>
-          <span class="count">${integer(n.acts.size)} kegiatan</span>
+          <span class="count">${integer(n.acts.size)} kegiatan · Akrual ${ribuan(n.real)}</span>
         </li>`;
     }).join('') + `
         <li>
@@ -1085,7 +917,7 @@
             <g>${markers}</g>
           </svg>
           ${pop}
-          ${points.length ? '' : '<div class="map-empty">Belum ada kegiatan tercatat di Aceh, Sumatera Utara, atau Sumatera Barat.</div>'}
+          ${mapped.some(key => loc.cats[key].acts.size) ? '' : '<div class="map-empty">Belum ada kegiatan tercatat di Aceh, Sumatera Utara, atau Sumatera Barat.</div>'}
         </div>
         <div>
           <div class="side-title">Keterangan</div>
@@ -1096,7 +928,7 @@
             <p class="note">Kegiatan koordinasi, sinkronisasi, pengendalian, dan monitoring di Jakarta atau provinsi lain. Tidak ditampilkan pada peta.</p>
             <dl>
               <dt>Jumlah kegiatan</dt><dd>${integer(lainnya.acts.size)}</dd>
-              <dt>Akrual</dt><dd>${rupiah(lainnya.real)}</dd>
+              <dt>Akrual</dt><dd>${ribuan(lainnya.real)}</dd>
             </dl>
           </div>
         </div>
@@ -1125,7 +957,7 @@
               </button>` : `<strong><span class="dot-cat" style="background:${c.color}"></span>${esc(c.label)}</strong>`}
           </td>
           <td class="num">${integer(node.acts.size)}</td>
-          <td class="num money">${rupiah(node.real)}</td>
+          <td class="num money">${ribuan(node.real)}</td>
         </tr>`);
 
       if (!open) return;
@@ -1142,7 +974,7 @@
             <tr class="child">
               <td><strong>${esc(name)}</strong></td>
               <td class="num">${integer(prov.acts.size)}</td>
-              <td class="num money">${rupiah(prov.real)}</td>
+              <td class="num money">${ribuan(prov.real)}</td>
             </tr>`);
         }
 
@@ -1152,7 +984,7 @@
             <tr class="child${single ? '' : ' grand'}">
               <td>${esc(kab)}</td>
               <td class="num">${integer(k.acts.size)}</td>
-              <td class="num money">${rupiah(k.real)}</td>
+              <td class="num money">${ribuan(k.real)}</td>
             </tr>`);
         });
       });
@@ -1172,7 +1004,7 @@
           <tr>
             <td>Total</td>
             <td class="num">${integer(loc.totalActs)}</td>
-            <td class="num money">${rupiah(loc.totalReal)}</td>
+            <td class="num money">${ribuan(loc.totalReal)}</td>
           </tr>
         </tfoot>
       </table>
@@ -1228,7 +1060,7 @@
             <div class="track" aria-hidden="true">
               <div class="fill" style="width:${(value(item) / max * 100).toFixed(2)}%;background:${CAT[item.cat].color}"></div>
             </div>
-            <div class="value">${state.indicator === 'realisasi' ? rupiah(item.real) : integer(item.acts) + ' kegiatan'}</div>
+            <div class="value">${state.indicator === 'realisasi' ? ribuan(item.real) : integer(item.acts) + ' kegiatan'}</div>
           </div>`).join('')}
       </div>
       ${rest > 0 ? `<p class="note chart-note" style="padding-bottom:0">Ditampilkan 10 wilayah teratas dari ${list.length} wilayah.</p>` : ''}`;
@@ -1316,14 +1148,14 @@
         const pct = s.budget ? s.real / s.budget * 100 : 0;
         let flag = '';
         if (s.real > s.budget) flag = '<span class="badge warn">Akrual melebihi pagu</span>';
-        else if (s.real + s.Pending > s.budget) flag = `<span class="badge warn" title="Akrual + Pending: ${rupiah(s.real + s.Pending)}">Pending melampaui sisa pagu</span>`;
+        else if (s.real + s.Pending > s.budget) flag = `<span class="badge warn" title="Akrual + Pending: ${ribuan(s.real + s.Pending)}">Pending melampaui sisa pagu</span>`;
         return `
           <tr>
             <td>${unitHtml(s.name)}${flag ? '<span class="sub">' + flag + '</span>' : ''}</td>
-            <td class="num money">${rupiah(s.budget)}</td>
-            <td class="num money">${rupiah(s.real)}</td>
-            <td class="num money">${rupiah(s.budget - s.real)}</td>
-            <td class="num money">${s.Pending ? rupiah(s.Pending) : '—'}</td>
+            <td class="num money">${ribuan(s.budget)}</td>
+            <td class="num money">${ribuan(s.real)}</td>
+            <td class="num money">${ribuan(s.budget - s.real)}</td>
+            <td class="num money">${s.Pending ? ribuan(s.Pending) : '—'}</td>
             <td>${progressCell(pct)}</td>
           </tr>`;
       }).join('');
@@ -1335,7 +1167,7 @@
     const statusStrip = `
         <div class="strip-total">
           <span class="badge akrual">Akrual</span>
-          <span class="amount">${state.loaded ? rupiah(akrualTotal) : '<span class="skeleton"></span>'}</span>
+          <span class="amount">${state.loaded ? ribuan(akrualTotal) : '<span class="skeleton"></span>'}</span>
           <span class="note">${integer(akrualCount)} transaksi · SP2D + SPP/SPM, sesuai pencatatan akrual di SAKTI.</span>
         </div>` + STATUSES.slice().reverse().map(status => {
       const info = STATUS_INFO[status];
@@ -1344,7 +1176,7 @@
       return `
         <div>
           <span class="badge ${info.cls}">${info.label}</span>
-          <span class="amount">${state.loaded ? rupiah(amount) : '<span class="skeleton"></span>'}</span>
+          <span class="amount">${state.loaded ? ribuan(amount) : '<span class="skeleton"></span>'}</span>
           <span class="note">${integer(list.length)} transaksi · ${info.desc}</span>
         </div>`;
     }).join('');
@@ -1357,6 +1189,7 @@
         <div class="panel-head">
           <div>
             <h3 id="ttlPagu">Pagu Anggaran per Unit Kerja</h3>
+            <small class="amount-unit">Dalam ribuan rupiah</small>
             <p class="note">
             </p>
           </div>
@@ -1379,10 +1212,10 @@
             <tfoot>
               <tr>
                 <td>Total</td>
-                <td class="num money">${rupiah(t.budget)}</td>
-                <td class="num money">${rupiah(t.real)}</td>
-                <td class="num money">${rupiah(t.budget - t.real)}</td>
-                <td class="num money">${t.Pending ? rupiah(t.Pending) : '—'}</td>
+                <td class="num money">${ribuan(t.budget)}</td>
+                <td class="num money">${ribuan(t.real)}</td>
+                <td class="num money">${ribuan(t.budget - t.real)}</td>
+                <td class="num money">${t.Pending ? ribuan(t.Pending) : '—'}</td>
                 <td>${progressCell(t.budget ? t.real / t.budget * 100 : 0)}</td>
               </tr>
             </tfoot>` : ''}
@@ -1393,7 +1226,8 @@
       <section class="panel" aria-labelledby="ttlDaftar">
         <div class="panel-head">
           <div>
-            <h3 id="ttlDaftar">Daftar Penggunaan Dana</h3> <br>
+            <h3 id="ttlDaftar">Daftar Penggunaan Dana</h3>
+            <small class="amount-unit">Dalam ribuan rupiah</small>
             <p class="note">Status bersifat bertahap dan saling eksklusif. Satu transaksi hanya berada pada satu status. <br>
             Akrual = SP2D + SPP/SPM ; Pending belum termasuk akrual.</p>
           </div>
@@ -1525,7 +1359,7 @@
                   <td style="min-width:220px">${unitHtml(unitName(e.unit))}</td>
                   <td class="wrap">${esc(e.note)}<span class="sub">${esc(e.kegiatanId || 'Tanpa kode kegiatan')} · Transaksi #${Number(e.id)}</span></td>
                   <td style="min-width:200px">${loc}</td>
-                  <td class="num money">${rupiah(e.amount)}</td>
+                  <td class="num money">${ribuan(e.amount)}</td>
                   <td>
                     ${editable ? `
                     <select class="status-select ${statusCls}" data-status-id="${Number(e.id)}" aria-label="Ubah status transaksi #${Number(e.id)}">
@@ -1537,7 +1371,7 @@
                   <td class="ref">
                     ${esc(e.ref || '—')}
                     ${e.fileKey
-                      ? `<span class="sub"><a href="${esc(fileUrl(e))}" target="_blank" rel="noopener noreferrer">Lihat dokumen</a></span>`
+                      ? `<span class="sub"><a href="${driveUrl(e.fileKey)}" target="_blank" rel="noopener noreferrer">Lihat dokumen</a></span>`
                       : '<span class="sub">Tanpa PDF</span>'}
                   </td>
                   ${editable ? `<td>
@@ -1553,9 +1387,9 @@
         </table>
       </div>
       <div class="table-foot">
-        Total nilai transaksi yang ditampilkan: <strong class="num">${rupiah(total)}</strong>
-        (seluruh status). Akrual (SP2D + SPP/SPM): <strong class="num">${rupiah(rows.reduce((s, e) => s + realisasi(e), 0))}</strong>.
-        Pending: <strong class="num">${rupiah(rows.reduce((s, e) => s + pending(e), 0))}</strong>.
+        Total nilai transaksi yang ditampilkan: <strong class="num">${ribuan(total)}</strong>
+        (seluruh status). Akrual (SP2D + SPP/SPM): <strong class="num">${ribuan(rows.reduce((s, e) => s + realisasi(e), 0))}</strong>.
+        Pending: <strong class="num">${ribuan(rows.reduce((s, e) => s + pending(e), 0))}</strong>.
       </div>`;
   }
 
@@ -1648,10 +1482,10 @@
     const counts = REALISASI_STATUSES.includes(status);
 
     if (counts && amount > 0 && real + amount > u.budget) {
-      result.error = `Akrual ${u.name} (SP2D + SPP/SPM) akan menjadi ${rupiah(real + amount)}, melebihi pagu ${rupiah(u.budget)}. ` +
+      result.error = `Akrual ${u.name} (SP2D + SPP/SPM) akan menjadi ${ribuan(real + amount)}, melebihi pagu ${ribuan(u.budget)} (dalam ribuan rupiah). ` +
         'Transaksi tidak dapat diproses sebelum ada penyesuaian alokasi yang sah.';
     } else if (amount > 0 && real + pend + amount > u.budget) {
-      result.warning = `Perhatian: akrual dan Pending ${u.name} akan menjadi ${rupiah(real + pend + amount)}, melampaui pagu ${rupiah(u.budget)}.`;
+      result.warning = `Perhatian: akrual dan Pending ${u.name} akan menjadi ${ribuan(real + pend + amount)}, melampaui pagu ${ribuan(u.budget)} (dalam ribuan rupiah).`;
     }
 
     return result;
@@ -1759,6 +1593,15 @@
     });
   }
 
+  function readBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1]);
+      reader.onerror = () => reject(new Error('PDF tidak dapat dibaca.'));
+      reader.readAsDataURL(file);
+    });
+  }
+
   function checkFile(file) {
     if (!file) return '';
     if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') return 'Berkas harus berupa PDF.';
@@ -1813,7 +1656,7 @@
           ${editing ? `
             <div class="doc-current">
               Dokumen: ${entry.fileKey
-                ? `<a href="${esc(fileUrl(entry))}" target="_blank" rel="noopener noreferrer">${esc(entry.fileName || 'Lihat PDF')}</a>`
+                ? `<a href="${driveUrl(entry.fileKey)}" target="_blank" rel="noopener noreferrer">${esc(entry.fileName || 'Lihat PDF')}</a>`
                 : 'belum ada PDF'} · gunakan tombol ${entry.fileKey ? 'Ganti PDF' : 'Unggah PDF'} pada daftar untuk mengelola dokumen.
             </div>` : pdfField(false)}
 
@@ -1945,7 +1788,7 @@
       const g = paguGuard(el('unit').value, amount, el('status').value, editing ? entry.id : null);
       const hint = root.querySelector('#paguHint');
       hint.className = 'hint' + (g.error ? ' warn' : '');
-      hint.textContent = g.error || g.warning || `Sisa pagu ${unitName(el('unit').value)}: ${rupiah(g.available)}.`;
+      hint.textContent = g.error || g.warning || `Sisa pagu ${unitName(el('unit').value)}: ${ribuan(g.available)} (dalam ribuan rupiah).`;
       const s = el('status').value;
       root.querySelector('#statusHint').textContent = STATUS_INFO[s] ? STATUS_INFO[s].desc : '';
       return g;
@@ -2024,7 +1867,10 @@
         if (editing) {
           result = await server('updateEntry', Object.assign({ id: entry.id, applyToActivity: apply }, data));
         } else {
-          if (file) data.file = file;
+          if (file) {
+            data.fileName = file.name;
+            data.base64 = await readBase64(file);
+          }
           result = await server('addEntry', data);
         }
 
@@ -2054,7 +1900,7 @@
         esc(entry.note))}
       <form id="pdfForm" novalidate>
         <div class="modal-body">
-          ${replacing ? `<div class="doc-current">Dokumen saat ini: <a href="${esc(fileUrl(entry))}" target="_blank" rel="noopener noreferrer">${esc(entry.fileName || 'Lihat PDF')}</a>. Dokumen lama tetap tersimpan dan penggantian tercatat di riwayat.</div>` : ''}
+          ${replacing ? `<div class="doc-current">Dokumen saat ini: <a href="${driveUrl(entry.fileKey)}" target="_blank" rel="noopener noreferrer">${esc(entry.fileName || 'Lihat PDF')}</a>. Dokumen lama tetap tersimpan di Supabase Storage dan penggantian tercatat di riwayat.</div>` : ''}
           ${pdfField(true)}
           <div id="formError" class="inline-error" role="alert" hidden></div>
         </div>
@@ -2077,7 +1923,7 @@
       setBusy(root, true, 'Mengunggah…');
 
       try {
-        await server('replacePdf', { id: entry.id, file });
+        await server('replacePdf', { id: entry.id, fileName: file.name, base64: await readBase64(file) });
         state.modal.busy = false;
         closeModal();
         await loadData(true);
@@ -2094,12 +1940,12 @@
   function openCancelModal(entry) {
     const html = `
       ${modalHead(`Batalkan transaksi #${Number(entry.id)}`,
-        'Transaksi dipindahkan ke arsip, tidak dihapus permanen. PDF tetap tersimpan.')}
+        'Transaksi dipindahkan ke arsip, tidak dihapus permanen. PDF tetap tersimpan di Supabase Storage.')}
       <form id="cancelForm" novalidate>
         <div class="modal-body">
           <div class="doc-current">
             <strong>${esc(entry.note)}</strong><br>
-            ${esc(unitName(entry.unit))} · ${rupiah(entry.amount)} · ${esc(STATUS_INFO[entry.status] ? STATUS_INFO[entry.status].label : 'Belum ditentukan')}
+            ${esc(unitName(entry.unit))} · ${ribuan(entry.amount)} (dalam ribuan rupiah) · ${esc(STATUS_INFO[entry.status] ? STATUS_INFO[entry.status].label : 'Belum ditentukan')}
           </div>
           <label class="field">
             <span>Alasan pembatalan</span>
@@ -2141,7 +1987,7 @@
     const stats = unitStats();
     const html = `
       ${modalHead('Penyesuaian alokasi pagu',
-        `Memindahkan alokasi antarunit kerja. Total pagu pengendalian tetap ${rupiah(state.paguTotal)} dan perubahan tercatat di riwayat.`)}
+        `Memindahkan alokasi antarunit kerja. Total pagu pengendalian tetap ${ribuan(state.paguTotal)} (dalam ribuan rupiah) dan perubahan tercatat di riwayat.`)}
       <form id="paguForm" novalidate>
         <div class="modal-body">
           <div class="formrow">
@@ -2178,8 +2024,8 @@
     function hints() {
       const from = stats.map[form.elements.from.value];
       const to = stats.map[form.elements.to.value];
-      root.querySelector('#fromHint').textContent = `Pagu ${rupiah(from.budget)} · minimal ${rupiah(from.real)} (akrual)`;
-      root.querySelector('#toHint').textContent = `Pagu ${rupiah(to.budget)}`;
+      root.querySelector('#fromHint').textContent = `Pagu ${ribuan(from.budget)} · minimal ${ribuan(from.real)} (akrual)`;
+      root.querySelector('#toHint').textContent = `Pagu ${ribuan(to.budget)}`;
     }
 
     form.elements.from.addEventListener('change', hints);
@@ -2203,7 +2049,7 @@
       let problem = '';
       if (data.from === data.to) problem = 'Pilih unit asal dan tujuan yang berbeda.';
       else if (!(data.amount > 0)) problem = 'Isi nilai penyesuaian.';
-      else if (from.budget - data.amount < from.real) problem = `Pagu ${from.name} tidak boleh lebih kecil dari akrualnya (${rupiah(from.real)}).`;
+      else if (from.budget - data.amount < from.real) problem = `Pagu ${from.name} tidak boleh lebih kecil dari akrualnya (${ribuan(from.real)} dalam ribuan rupiah).`;
       else if (!data.dasar) problem = 'Isi dasar penyesuaian.';
       if (problem) { showFormError(root, problem); return; }
 
@@ -2281,11 +2127,11 @@
       const day = String(r.time || '').slice(0, 10);
       if (h.from && day < h.from) return false;
       if (h.to && day > h.to) return false;
-      if (h.unit && !String(r.unit).includes(h.unit)) return false;
+      if (h.unit && !historyUnit(r.unit).includes(h.unit)) return false;
       if (h.user && r.user !== h.user) return false;
       if (h.activity && r.activity !== h.activity) return false;
       if (q) {
-        const text = [r.ref, r.field, r.before, r.after, r.unit, r.activity, r.id ? '#' + r.id : ''].join(' ').toLowerCase();
+        const text = [r.ref, r.field, r.before, r.after, r.unit, historyUnit(r.unit), r.activity, r.id ? '#' + r.id : ''].join(' ').toLowerCase();
         if (!text.includes(q)) return false;
       }
       return true;
@@ -2335,7 +2181,7 @@
             ${shown.map(r => `
               <tr>
                 <td style="white-space:nowrap">${timeLabel(r.time)}</td>
-                <td style="white-space:nowrap">${esc(r.unit || '—')}</td>
+                <td>${esc(historyUnit(r.unit))}</td>
                 <td class="ref">${esc(r.ref || '—')}${r.id ? `<span class="sub">Transaksi #${Number(r.id)}</span>` : ''}</td>
                 <td><span class="activity">${esc(r.activity)}</span></td>
                 <td class="wrap">
@@ -2527,7 +2373,7 @@
   }
 
   function passwordProblem(value) {
-    if (value.length < 8 || value.length > 72) return 'Password minimal 8 karakter (maksimal 72).';
+    if (value.length < 8) return 'Password minimal 8 karakter.';
     if (!/[A-Za-z]/.test(value) || !/\d/.test(value)) return 'Password harus berisi huruf dan angka.';
     return '';
   }
@@ -2537,7 +2383,7 @@
       <label class="field">
         <span>${label}</span>
         <div class="pw-row">
-          <input type="text" name="password" autocomplete="new-password" spellcheck="false" maxlength="72" placeholder="Minimal 8 karakter, huruf dan angka">
+          <input type="text" name="password" autocomplete="new-password" spellcheck="false" maxlength="100" placeholder="Minimal 8 karakter, huruf dan angka">
           <button type="button" class="btn btn-secondary" data-gen>Buat acak</button>
         </div>
         <span class="hint">Catat password ini dan sampaikan langsung kepada pengguna. Password tidak dapat dilihat kembali setelah disimpan.</span>
@@ -2732,7 +2578,7 @@
       saveSession();
       if (roleChanged) renderShell();
       state.pagu = data.pagu || [];
-      state.paguTotal = data.paguTotal || state.paguTotal;
+      state.paguTotal = data.paguTotal ?? unitStats().total.budget;
       state.entries = (data.entries || []).map(e => Object.assign({}, e, {
         id: Number(e.id), amount: Number(e.amount) || 0
       }));
@@ -2791,7 +2637,7 @@
         daysInStatus(e) === null ? '' : daysInStatus(e),
         staleInfo(e) ? staleInfo(e).text : '',
         e.ref, e.fileName,
-        e.fileKey ? fileUrl(e) : ''
+        e.fileKey ? driveUrl(e.fileKey) : ''
       ])
     ]);
   }
@@ -2851,7 +2697,7 @@
             <label class="field">
               <span>Password</span>
               <div class="pw-row">
-                <input name="password" type="password" autocomplete="current-password" maxlength="72" required>
+                <input name="password" type="password" autocomplete="current-password" maxlength="100" required>
                 <button type="button" class="btn btn-secondary pw-toggle" id="pwToggle" aria-label="Tampilkan password" aria-pressed="false">${ICON.eye}</button>
               </div>
             </label>
@@ -2913,19 +2759,20 @@
     loadBackground();
   }
 
-  function signOut() {
+  async function signOut() {
+    const token = state.token;
     clearSession();
     renderLogin('Anda telah keluar.');
+    try { await server('logout', token); } catch (ignore) {}
   }
 
   let expiredShown = false;
 
-  function sessionExpired(message) {
+  function sessionExpired() {
     if (expiredShown || !state.token) return;
     expiredShown = true;
     clearSession();
-    renderLogin(/dinonaktifkan|belum terdaftar/.test(message || '')
-      ? message : 'Sesi berakhir. Silakan masuk kembali.');
+    renderLogin('Sesi berakhir. Silakan masuk kembali.');
     setTimeout(() => { expiredShown = false; }, 500);
   }
 
@@ -2943,37 +2790,9 @@
   // MULAI
   // =========================================
 
-  function renderSetupNeeded(message) {
-    document.getElementById('root').innerHTML = `
-      <div class="login-page">
-        <div class="login-card">
-          <h2>${esc(message ? 'Aplikasi tidak dapat dimuat' : 'Konfigurasi belum lengkap')}</h2>
-          <p class="note">${esc(message || 'Isi alamat proyek (supabaseUrl) dan kunci publik (supabaseAnonKey) Supabase pada berkas config.js, lalu muat ulang halaman ini.')}</p>
-        </div>
-      </div>`;
-  }
-
-  async function start() {
-    if (!REF || !REF.wilayah) {
-      renderSetupNeeded('Data wilayah (wilayah.js) tidak termuat. Pastikan berkas wilayah.js ada di folder yang sama dengan index.html.');
-      return;
-    }
-
+  function start() {
     buildProv();
-
-    if (!window.supabase) {
-      renderSetupNeeded('Pustaka Supabase tidak termuat. Periksa koneksi internet, lalu muat ulang halaman.');
-      return;
-    }
-
-    if (!sb) { renderSetupNeeded(''); return; }
-
-    // Sesi yang tidak dapat diperpanjang (misalnya password diatur ulang).
-    sb.auth.onAuthStateChange(event => {
-      if (event === 'SIGNED_OUT' && state.token) sessionExpired();
-    });
-
-    const saved = await readSession();
+    const saved = readSession();
 
     if (saved) {
       state.token = saved.token;
@@ -2984,5 +2803,17 @@
     }
   }
 
-  start();
+  // Data wilayah biasanya sudah tersedia dari Index.html; jika belum,
+  // diambil langsung dari server.
+  if (REF) {
+    start();
+  } else {
+    server('getReferensi')
+      .then(data => { REF = data; start(); })
+      .catch(error => {
+        document.getElementById('root').innerHTML =
+          '<div class="panel" style="margin:24px"><div class="empty"><h3>Data wilayah tidak dapat dimuat</h3><p>' +
+          esc(errorText(error)) + '</p></div></div>';
+      });
+  }
 })();
