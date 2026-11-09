@@ -2573,6 +2573,7 @@
 
     try {
       const data = await server('getAppData');
+      if (!data || !data.user) throw Error('Data Ringkasan tidak lengkap dari prrp-api. Periksa Edge Function dan sesi login.');
       const roleChanged = !state.user || state.user.peran !== data.user.peran;
       state.user = data.user;
       saveSession();

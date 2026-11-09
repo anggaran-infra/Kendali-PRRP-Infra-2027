@@ -35,6 +35,12 @@
     });
     const result = await response.json().catch(()=>({error:'Server mengembalikan respons tidak valid.'}));
     if (!response.ok) throw Error(result.error || 'Permintaan gagal ('+response.status+').');
+    if (!Object.prototype.hasOwnProperty.call(result, 'data')) {
+      throw Error('Respons prrp-api tidak sesuai: properti data tidak ditemukan. Periksa deployment Edge Function prrp-api dan tab Logs.');
+    }
+    if (name === 'getAppData' && (!result.data || typeof result.data !== 'object' || !result.data.user || !Array.isArray(result.data.pagu) || !Array.isArray(result.data.entries))) {
+      throw Error('Respons getAppData tidak lengkap (user/pagu/entries). Pastikan Edge Function prrp-api memakai index.ts dari paket migrasi terbaru.');
+    }
     return result.data;
   }
   // Restore a current access token on page reload instead of the expired cached JWT.
